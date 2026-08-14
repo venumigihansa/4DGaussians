@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any
 
@@ -9,12 +10,37 @@ import numpy as np
 from PIL import Image
 
 from .config import PriorConfig
-from .flow import flow_path, forward_backward_consistency, load_flow, motion_support, residual_flow
+from .flow import flow_path, forward_backward_consistency, load_flow, residual_flow
 from .geometry import camera_flow_from_depth
-from .sam2_prior import Sam2ProposalGenerator, fuse_motion_with_proposals
+from .motion import (
+    AdaptiveMotionSupport,
+    PoseFlowRefinement,
+    adaptive_motion_support,
+    depth_confidence_mask,
+    refine_pose_camera_flow,
+)
+from .sam2_prior import PromptedSegmentationResult, Sam2PromptedSegmenter, segment_motion_components
 
 
 REQUIRED_GEOMETRY_KEYS = ("image_paths", "extrinsic", "intrinsic", "depth", "depth_conf")
+
+
+@dataclass(frozen=True)
+class FlowObservation:
+    direction: str
+    target_index: int
+    observed_flow: np.ndarray
+    pose_camera_flow: np.ndarray
+    camera_fit_valid: np.ndarray
+    motion_detection_valid: np.ndarray
+    confidence_threshold: float
+
+
+@dataclass(frozen=True)
+class MotionPass:
+    support: np.ndarray
+    magnitude: np.ndarray
+    direction_records: tuple[dict[str, Any], ...]
 
 
 def load_page4d_geometry(path: Path) -> dict[str, np.ndarray]:
@@ -24,16 +50,32 @@ def load_page4d_geometry(path: Path) -> dict[str, np.ndarray]:
         missing = [key for key in REQUIRED_GEOMETRY_KEYS if key not in archive.files]
         if missing:
             raise KeyError(f"PAGE4D predictions are missing keys: {', '.join(missing)}")
-        # Access only these arrays. In particular, do not read world_points.
+        # Deliberately access only these arrays; world_points can be absent or corrupted.
         result = {key: np.asarray(archive[key]) for key in REQUIRED_GEOMETRY_KEYS}
-    result["depth"] = np.asarray(result["depth"], dtype=np.float32).squeeze(-1)
+    result["depth"] = np.asarray(result["depth"], dtype=np.float32)
     result["depth_conf"] = np.asarray(result["depth_conf"], dtype=np.float32)
+    if result["depth"].ndim == 4 and result["depth"].shape[-1] == 1:
+        result["depth"] = result["depth"][..., 0]
+    if result["depth_conf"].ndim == 4 and result["depth_conf"].shape[-1] == 1:
+        result["depth_conf"] = result["depth_conf"][..., 0]
+    if result["depth"].ndim != 3:
+        raise ValueError(f"Expected PAGE4D depth [N,H,W] or [N,H,W,1], got {result['depth'].shape}")
+    if result["depth_conf"].ndim != 3:
+        raise ValueError(
+            f"Expected PAGE4D depth_conf [N,H,W] or [N,H,W,1], got "
+            f"{result['depth_conf'].shape}"
+        )
     result["intrinsic"] = np.asarray(result["intrinsic"], dtype=np.float32)
     result["extrinsic"] = np.asarray(result["extrinsic"], dtype=np.float32)
     frame_count = len(result["depth"])
     for key in REQUIRED_GEOMETRY_KEYS:
         if len(result[key]) != frame_count:
             raise ValueError(f"PAGE4D frame-count mismatch for {key}: {len(result[key])} != {frame_count}")
+    if result["depth_conf"].shape != result["depth"].shape:
+        raise ValueError(
+            f"PAGE4D depth-confidence shape mismatch: {result['depth_conf'].shape} != "
+            f"{result['depth'].shape}"
+        )
     return result
 
 
@@ -61,52 +103,149 @@ def save_overlay(path: Path, image: np.ndarray, mask: np.ndarray) -> None:
     Image.fromarray(np.clip(overlay, 0, 255).astype(np.uint8)).save(path)
 
 
-def build_motion_evidence(
+def frame_flow_specs(index: int, frame_count: int) -> list[tuple[str, int]]:
+    """Return the available source-frame observations for a sequence position."""
+    if index < 0 or index >= frame_count:
+        raise IndexError(f"Frame index {index} is outside a sequence of {frame_count} frames")
+    result: list[tuple[str, int]] = []
+    if index < frame_count - 1:
+        result.append(("forward", index + 1))
+    if index > 0:
+        result.append(("backward", index - 1))
+    return result
+
+
+def _load_observations(
+    index: int,
     geometry: dict[str, np.ndarray],
     forward_flow_dir: Path,
     backward_flow_dir: Path,
     config: PriorConfig,
-) -> tuple[list[np.ndarray], list[np.ndarray]]:
+) -> list[FlowObservation]:
     frame_count, height, width = geometry["depth"].shape
-    supports = [np.zeros((height, width), dtype=bool) for _ in range(frame_count)]
-    magnitudes = [np.full((height, width), np.nan, dtype=np.float32) for _ in range(frame_count)]
-    for index in range(frame_count - 1):
-        forward = load_flow(flow_path(forward_flow_dir, index, index + 1), (height, width))
-        backward = load_flow(flow_path(backward_flow_dir, index + 1, index), (height, width))
-        forward_consistent, _ = forward_backward_consistency(
-            forward, backward, config.flow_consistency_threshold
+    confidence_valid, confidence_threshold = depth_confidence_mask(
+        geometry["depth_conf"][index], config.depth_confidence_quantile
+    )
+    observations: list[FlowObservation] = []
+    for direction, target_index in frame_flow_specs(index, frame_count):
+        if direction == "forward":
+            observed_path = flow_path(forward_flow_dir, index, target_index)
+            inverse_path = flow_path(backward_flow_dir, target_index, index)
+        else:
+            observed_path = flow_path(backward_flow_dir, index, target_index)
+            inverse_path = flow_path(forward_flow_dir, target_index, index)
+        observed = load_flow(observed_path, (height, width))
+        inverse = load_flow(inverse_path, (height, width))
+        consistent, _ = forward_backward_consistency(
+            observed, inverse, config.flow_consistency_threshold
         )
-        backward_consistent, _ = forward_backward_consistency(
-            backward, forward, config.flow_consistency_threshold
-        )
-
-        camera_forward, valid_forward = camera_flow_from_depth(
+        pose_flow, pose_valid = camera_flow_from_depth(
             geometry["depth"][index],
             geometry["intrinsic"][index],
             geometry["extrinsic"][index],
-            geometry["intrinsic"][index + 1],
-            geometry["extrinsic"][index + 1],
+            geometry["intrinsic"][target_index],
+            geometry["extrinsic"][target_index],
         )
-        camera_backward, valid_backward = camera_flow_from_depth(
-            geometry["depth"][index + 1],
-            geometry["intrinsic"][index + 1],
-            geometry["extrinsic"][index + 1],
-            geometry["intrinsic"][index],
-            geometry["extrinsic"][index],
+        # Depth confidence protects the camera correction fit, but it must not
+        # suppress motion evidence on textureless or overexposed objects.
+        motion_detection_valid = consistent & pose_valid
+        camera_fit_valid = motion_detection_valid & confidence_valid
+        observations.append(
+            FlowObservation(
+                direction,
+                target_index,
+                observed,
+                pose_flow,
+                camera_fit_valid,
+                motion_detection_valid,
+                confidence_threshold,
+            )
         )
-        valid_forward &= geometry["depth_conf"][index] >= config.min_depth_confidence
-        valid_backward &= geometry["depth_conf"][index + 1] >= config.min_depth_confidence
-        valid_forward &= forward_consistent
-        valid_backward &= backward_consistent
-        residual_forward = residual_flow(forward, camera_forward, valid_forward)
-        residual_backward = residual_flow(backward, camera_backward, valid_backward)
-        supports[index] |= motion_support(residual_forward, config.residual_threshold, valid_forward)
-        supports[index + 1] |= motion_support(residual_backward, config.residual_threshold, valid_backward)
-        magnitudes[index] = np.fmax(magnitudes[index], np.linalg.norm(residual_forward, axis=-1))
-        magnitudes[index + 1] = np.fmax(
-            magnitudes[index + 1], np.linalg.norm(residual_backward, axis=-1)
+    return observations
+
+
+def _optional_number(value: float | None) -> float | None:
+    if value is None or not np.isfinite(value):
+        return None
+    return float(value)
+
+
+def _direction_record(
+    observation: FlowObservation,
+    refinement: PoseFlowRefinement,
+    support: AdaptiveMotionSupport,
+) -> dict[str, Any]:
+    return {
+        "direction": observation.direction,
+        "target_index": observation.target_index,
+        "depth_confidence_threshold": _optional_number(observation.confidence_threshold),
+        "valid_pixel_count": refinement.valid_pixels,
+        "camera_fit_valid_pixel_count": refinement.valid_pixels,
+        "motion_detection_valid_pixel_count": int(observation.motion_detection_valid.sum()),
+        "low_confidence_detection_pixel_count": int(
+            (observation.motion_detection_valid & ~observation.camera_fit_valid).sum()
+        ),
+        "correction_vector": [float(value) for value in refinement.correction],
+        "correction_accepted": refinement.accepted,
+        "correction_rank": refinement.equation_rank,
+        "irls_iterations": refinement.iterations,
+        "median_residual_before_correction": _optional_number(refinement.median_before),
+        "median_residual_after_correction": _optional_number(refinement.median_after),
+        "correction_status": refinement.reason,
+        "residual_median": _optional_number(support.median),
+        "residual_mad": _optional_number(support.mad),
+        "residual_threshold": _optional_number(support.threshold),
+        "residual_valid_pixel_count": support.valid_pixels,
+        "motion_pixel_count": int(support.mask.sum()),
+    }
+
+
+def _run_motion_pass(
+    observations: list[FlowObservation],
+    depth: np.ndarray,
+    intrinsic: np.ndarray,
+    config: PriorConfig,
+    exclusion_mask: np.ndarray | None = None,
+) -> MotionPass:
+    merged_support = np.zeros(depth.shape, dtype=bool)
+    merged_magnitude = np.full(depth.shape, np.nan, dtype=np.float32)
+    records: list[dict[str, Any]] = []
+    for observation in observations:
+        refinement = refine_pose_camera_flow(
+            observation.observed_flow,
+            observation.pose_camera_flow,
+            depth,
+            intrinsic,
+            observation.camera_fit_valid,
+            exclusion_mask=exclusion_mask,
+            iterations=config.irls_iterations,
+            enabled=config.refine_pose_flow,
         )
-    return supports, magnitudes
+        residual = residual_flow(
+            observation.observed_flow,
+            refinement.camera_flow,
+            observation.motion_detection_valid,
+        )
+        support = adaptive_motion_support(
+            residual, observation.motion_detection_valid, config.mad_multiplier
+        )
+        merged_support |= support.mask
+        merged_magnitude = np.fmax(merged_magnitude, support.magnitude)
+        records.append(_direction_record(observation, refinement, support))
+    return MotionPass(merged_support, merged_magnitude, tuple(records))
+
+
+def _segmentation_record(result: PromptedSegmentationResult) -> dict[str, Any]:
+    return {
+        "component_count": len(result.components),
+        "sam2_acceptances": result.accepted_masks,
+        "sam2_rejections": result.rejected_masks,
+        "sam2_failures": result.failed_predictions,
+        "residual_fallbacks": result.fallback_components,
+        "sam2_pixels": int(result.sam_mask.sum()),
+        "fused_pixels": int(result.fused_mask.sum()),
+        "components": list(result.components),
+    }
 
 
 def run_prior_pipeline(
@@ -119,55 +258,100 @@ def run_prior_pipeline(
     sam2_checkpoint: Path,
     config: PriorConfig,
     device: str = "cuda",
+    segmenter: Sam2PromptedSegmenter | None = None,
 ) -> dict[str, Any]:
     config.validate()
     images = sorted(image_dir.glob("*.png"))
+    if not images:
+        raise FileNotFoundError(f"No PNG images found in {image_dir}")
     geometry = load_page4d_geometry(predictions)
     if len(images) != len(geometry["depth"]):
         raise ValueError(f"Image/geometry frame mismatch: {len(images)} != {len(geometry['depth'])}")
     expected_hw = tuple(geometry["depth"].shape[1:])
-    supports, magnitudes = build_motion_evidence(
-        geometry, forward_flow_dir, backward_flow_dir, config
-    )
-    generator = Sam2ProposalGenerator(sam2_model_cfg, sam2_checkpoint, device=device)
+    sam2 = segmenter or Sam2PromptedSegmenter(sam2_model_cfg, sam2_checkpoint, device=device)
+
     frame_records: list[dict[str, Any]] = []
     for index, image_path in enumerate(images):
         rgb = np.asarray(Image.open(image_path).convert("RGB"))
         if rgb.shape[:2] != expected_hw:
             raise ValueError(f"Image resolution mismatch for {image_path}: {rgb.shape[:2]} != {expected_hw}")
-        proposals = generator.generate(rgb)
-        fusion = fuse_motion_with_proposals(
-            supports[index],
-            proposals,
-            config.sam_support_ratio,
-            config.sam_support_pixels,
-            config.min_component_area,
+        observations = _load_observations(
+            index, geometry, forward_flow_dir, backward_flow_dir, config
         )
+        initial = _run_motion_pass(
+            observations, geometry["depth"][index], geometry["intrinsic"][index], config
+        )
+
+        # SAM2 sees this frame only. Residual components provide prompts, not labels.
+        sam2.set_image(rgb)
+        provisional = segment_motion_components(
+            initial.support,
+            sam2.predictor,
+            min_component_area=config.min_component_area,
+            box_padding_ratio=config.sam_box_padding_ratio,
+            min_component_coverage=config.sam_min_component_coverage,
+        )
+        refined = _run_motion_pass(
+            observations,
+            geometry["depth"][index],
+            geometry["intrinsic"][index],
+            config,
+            exclusion_mask=provisional.fused_mask,
+        )
+        final_segmentation = segment_motion_components(
+            refined.support,
+            sam2.predictor,
+            min_component_area=config.min_component_area,
+            box_padding_ratio=config.sam_box_padding_ratio,
+            min_component_coverage=config.sam_min_component_coverage,
+        )
+
         name = image_path.stem
-        prior_rel = Path("masks") / f"{name}.png"
-        save_binary_mask(output_dir / prior_rel, fusion.mask)
-        save_binary_mask(output_dir / "motion_support" / f"{name}.png", supports[index])
-        save_magnitude(output_dir / "residual_magnitude" / f"{name}.png", magnitudes[index])
-        save_overlay(output_dir / "overlays" / f"{name}.png", rgb, fusion.mask)
+        paths = {
+            "residual_support_initial": Path("residual_support_initial") / f"{name}.png",
+            "residual_support_refined": Path("residual_support_refined") / f"{name}.png",
+            "residual_magnitude": Path("residual_magnitude") / f"{name}.png",
+            "sam2_mask": Path("sam2_masks") / f"{name}.png",
+            "prior": Path("masks") / f"{name}.png",
+            "overlay": Path("overlays") / f"{name}.png",
+        }
+        save_binary_mask(output_dir / paths["residual_support_initial"], initial.support)
+        save_binary_mask(output_dir / paths["residual_support_refined"], refined.support)
+        save_magnitude(output_dir / paths["residual_magnitude"], refined.magnitude)
+        save_binary_mask(output_dir / paths["sam2_mask"], final_segmentation.sam_mask)
+        save_binary_mask(output_dir / paths["prior"], final_segmentation.fused_mask)
+        save_overlay(output_dir / paths["overlay"], rgb, final_segmentation.fused_mask)
         frame_records.append(
             {
                 "index": index,
                 "image_name": name,
-                "prior": str(prior_rel),
-                "accepted_sam2_proposals": fusion.accepted_proposals,
-                "fallback_components": fusion.fallback_components,
-                "dynamic_pixels": int(fusion.mask.sum()),
+                # Retain the established top-level key consumed by stage 3.
+                "prior": str(paths["prior"]),
+                "paths": {key: str(value) for key, value in paths.items()},
+                "initial_motion": {
+                    "motion_pixel_count": int(initial.support.sum()),
+                    "directions": list(initial.direction_records),
+                },
+                "provisional_segmentation": _segmentation_record(provisional),
+                "refined_motion": {
+                    "motion_pixel_count": int(refined.support.sum()),
+                    "directions": list(refined.direction_records),
+                },
+                "final_segmentation": _segmentation_record(final_segmentation),
             }
         )
+
     manifest = {
-        "version": 1,
+        "version": 2,
+        "method": "page4d_pose_plus_robust_flow_correction_and_per_frame_sam2",
         "images": str(image_dir.resolve()),
         "forward_flow": str(forward_flow_dir.resolve()),
         "backward_flow": str(backward_flow_dir.resolve()),
         "page4d_predictions": str(predictions.resolve()),
         "sam2_model_cfg": sam2_model_cfg,
         "sam2_checkpoint": str(sam2_checkpoint.resolve()),
-        "config": config.to_dict(),
+        "config": asdict(config),
+        "ground_truth_used": False,
         "frames": frame_records,
     }
     output_dir.mkdir(parents=True, exist_ok=True)

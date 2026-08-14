@@ -7,22 +7,30 @@ from typing import Any
 
 @dataclass(frozen=True)
 class PriorConfig:
-    residual_threshold: float = 1.0
+    mad_multiplier: float = 5.0
     flow_consistency_threshold: float = 1.5
-    min_depth_confidence: float = 0.0
-    sam_support_ratio: float = 0.05
-    sam_support_pixels: int = 64
-    min_component_area: int = 64
+    depth_confidence_quantile: float = 0.10
+    irls_iterations: int = 30
+    min_component_area: int = 256
+    sam_box_padding_ratio: float = 0.05
+    sam_min_component_coverage: float = 0.50
+    refine_pose_flow: bool = True
 
     def validate(self) -> "PriorConfig":
-        if self.residual_threshold < 0:
-            raise ValueError("residual_threshold must be non-negative")
+        if self.mad_multiplier < 0:
+            raise ValueError("mad_multiplier must be non-negative")
         if self.flow_consistency_threshold < 0:
             raise ValueError("flow_consistency_threshold must be non-negative")
-        if not 0 <= self.sam_support_ratio <= 1:
-            raise ValueError("sam_support_ratio must be in [0, 1]")
-        if self.sam_support_pixels < 1 or self.min_component_area < 1:
-            raise ValueError("pixel and component thresholds must be positive")
+        if not 0 <= self.depth_confidence_quantile < 1:
+            raise ValueError("depth_confidence_quantile must be in [0, 1)")
+        if self.irls_iterations < 1:
+            raise ValueError("irls_iterations must be positive")
+        if self.min_component_area < 1:
+            raise ValueError("min_component_area must be positive")
+        if self.sam_box_padding_ratio < 0:
+            raise ValueError("sam_box_padding_ratio must be non-negative")
+        if not 0 <= self.sam_min_component_coverage <= 1:
+            raise ValueError("sam_min_component_coverage must be in [0, 1]")
         return self
 
     def to_dict(self) -> dict[str, Any]:

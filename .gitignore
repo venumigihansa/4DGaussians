@@ -12,7 +12,7 @@ submodules/
 
 # Post-hoc dynamic split artifacts and external model weights
 dynamic_priors/
-dynamic_split_outputs/
+dynamic_split/outputs/
 **/dynamic_logits.pt
 **/gaussian_dynamic_split.npz
 **/static_gaussians.ply

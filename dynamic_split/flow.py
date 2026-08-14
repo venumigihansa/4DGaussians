@@ -70,11 +70,3 @@ def residual_flow(observed: np.ndarray, camera: np.ndarray, valid: np.ndarray | 
         finite &= np.asarray(valid, dtype=bool)
     result[~finite] = np.nan
     return result
-
-
-def motion_support(residual: np.ndarray, threshold: float, valid: np.ndarray | None = None) -> np.ndarray:
-    magnitude = np.linalg.norm(residual, axis=-1)
-    mask = np.isfinite(magnitude) & (magnitude > threshold)
-    if valid is not None:
-        mask &= np.asarray(valid, dtype=bool)
-    return mask
