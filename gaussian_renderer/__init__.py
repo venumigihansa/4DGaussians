@@ -15,7 +15,7 @@ from diff_gaussian_rasterization import GaussianRasterizationSettings, GaussianR
 from scene.gaussian_model import GaussianModel
 from utils.sh_utils import eval_sh
 from time import time as get_time
-def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, stage="fine", cam_type=None):
+def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, scaling_modifier = 1.0, override_color = None, stage="fine", cam_type=None, gaussian_mask=None):
     """
     Render the scene. 
     
@@ -114,6 +114,28 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             # shs = 
     else:
         colors_precomp = override_color
+        # A rasterization call must use either SH coefficients or precomputed
+        # colors, never both. Dynamic-logit rendering uses this differentiable
+        # override-color path without changing the CUDA rasterizer.
+        shs_final = None
+
+    if gaussian_mask is not None:
+        gaussian_mask = gaussian_mask.to(device=means3D_final.device, dtype=torch.bool)
+        if gaussian_mask.ndim != 1 or gaussian_mask.shape[0] != means3D_final.shape[0]:
+            raise ValueError("gaussian_mask must be a boolean vector with one entry per Gaussian")
+        means3D_final = means3D_final[gaussian_mask]
+        means2D = means2D[gaussian_mask]
+        opacity = opacity[gaussian_mask]
+        if scales_final is not None:
+            scales_final = scales_final[gaussian_mask]
+        if rotations_final is not None:
+            rotations_final = rotations_final[gaussian_mask]
+        if cov3D_precomp is not None:
+            cov3D_precomp = cov3D_precomp[gaussian_mask]
+        if shs_final is not None:
+            shs_final = shs_final[gaussian_mask]
+        if colors_precomp is not None:
+            colors_precomp = colors_precomp[gaussian_mask]
 
     # Rasterize visible Gaussians to image, obtain their radii (on screen). 
     # time3 = get_time()
@@ -136,4 +158,3 @@ def render(viewpoint_camera, pc : GaussianModel, pipe, bg_color : torch.Tensor, 
             "visibility_filter" : radii > 0,
             "radii": radii,
             "depth":depth}
-
