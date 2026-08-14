@@ -71,6 +71,16 @@ class PipelineParams(ParamGroup):
         self.compute_cov3D_python = False
         self.debug = False
         super().__init__(parser, "Pipeline Parameters")
+class DynamicSplitParams(ParamGroup):
+    def __init__(self, parser, sentinel=False):
+        self.train_dynamic_split = False
+        self.dynamic_prior_dir = ""
+        self.dynamic_output_dir = ""
+        self.dynamic_iterations = 3_000
+        self.dynamic_lr_init = 0.05
+        self.dynamic_lr_final = 0.005
+        self.dynamic_threshold = 7.0
+        super().__init__(parser, "Post-hoc Dynamic Split Parameters", sentinel)
 class ModelHiddenParams(ParamGroup):
     def __init__(self, parser):
         self.net_width = 64 # width of deformation MLP, larger will increase the rendering quality and decrase the training/rendering speed.

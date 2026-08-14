@@ -1,6 +1,5 @@
 
 import os
-import cv2
 import random
 import numpy as np
 from PIL import Image

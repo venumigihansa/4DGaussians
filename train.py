@@ -22,14 +22,14 @@ import uuid
 from tqdm import tqdm
 from utils.image_utils import psnr
 from argparse import ArgumentParser, Namespace
-from arguments import ModelParams, PipelineParams, OptimizationParams, ModelHiddenParams
+from arguments import ModelParams, PipelineParams, OptimizationParams, ModelHiddenParams, DynamicSplitParams
 from torch.utils.data import DataLoader
 from utils.timer import Timer
 from utils.loader_utils import FineSampler, get_stamp_list
-import lpips
 from utils.scene_utils import render_training_image
 from time import time
 import copy
+from pathlib import Path
 
 to8b = lambda x : (255*np.clip(x.cpu().numpy(),0,1)).astype(np.uint8)
 
@@ -294,7 +294,7 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" +f"_{stage}_" + str(iteration) + ".pth")
-def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
+def training(dataset, hyper, opt, pipe, dynamic_opt, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from, expname):
     # first_iter = 0
     tb_writer = prepare_output_and_logger(expname)
     gaussians = GaussianModel(dataset.sh_degree, hyper)
@@ -308,6 +308,22 @@ def training(dataset, hyper, opt, pipe, testing_iterations, saving_iterations, c
     scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_iterations,
                          checkpoint_iterations, checkpoint, debug_from,
                          gaussians, scene, "fine", tb_writer, opt.iterations,timer)
+    if dynamic_opt.train_dynamic_split:
+        from dynamic_split.config import DynamicSplitConfig
+        from dynamic_split.trainer import run_dynamic_stage
+
+        dynamic_output = dynamic_opt.dynamic_output_dir or os.path.join(args.model_path, "dynamic_split")
+        dynamic_config = DynamicSplitConfig(
+            prior_dir=Path(dynamic_opt.dynamic_prior_dir),
+            output_dir=Path(dynamic_output),
+            iterations=dynamic_opt.dynamic_iterations,
+            lr_init=dynamic_opt.dynamic_lr_init,
+            lr_final=dynamic_opt.dynamic_lr_final,
+            threshold=dynamic_opt.dynamic_threshold,
+            checkpoint_path=checkpoint,
+            source_path=dataset.source_path,
+        )
+        run_dynamic_stage(scene, gaussians, pipe, dynamic_config, tb_writer)
 
 def prepare_output_and_logger(expname):    
     if not args.model_path:
@@ -399,6 +415,7 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     pp = PipelineParams(parser)
     hp = ModelHiddenParams(parser)
+    dp = DynamicSplitParams(parser)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
@@ -426,7 +443,7 @@ if __name__ == "__main__":
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
+    training(lp.extract(args), hp.extract(args), op.extract(args), pp.extract(args), dp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from, args.expname)
 
     # All done
     print("\nTraining complete.")
