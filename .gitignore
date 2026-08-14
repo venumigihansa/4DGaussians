@@ -9,3 +9,14 @@ screenshots
 data/
 data
 submodules/
+
+# Post-hoc dynamic split artifacts and external model weights
+dynamic_priors/
+dynamic_split_outputs/
+**/dynamic_logits.pt
+**/gaussian_dynamic_split.npz
+**/static_gaussians.ply
+**/dynamic_gaussians.ply
+**/static_dynamic_overlay.mp4
+**/sam2*.pt
+**/sam2*.pth
