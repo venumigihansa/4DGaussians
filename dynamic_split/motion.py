@@ -108,7 +108,7 @@ def refine_pose_camera_flow(
     min_equations: int = 1_000,
     enabled: bool = True,
 ) -> PoseFlowRefinement:
-    """Robustly fit a small 6-DoF flow correction around PAGE4D pose flow."""
+    """Robustly fit a small 6-DoF correction around geometry-derived camera flow."""
     observed = np.asarray(observed_flow, dtype=np.float32)
     baseline = np.asarray(pose_camera_flow, dtype=np.float32)
     if observed.shape != baseline.shape or observed.ndim != 3 or observed.shape[-1] != 2:

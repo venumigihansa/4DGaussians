@@ -12,6 +12,7 @@
 import os
 import random
 import json
+from pathlib import Path
 from utils.system_utils import searchForMaxIteration
 from scene.dataset_readers import sceneLoadTypeCallbacks
 from scene.gaussian_model import GaussianModel
@@ -42,7 +43,19 @@ class Scene:
         self.train_cameras = {}
         self.test_cameras = {}
         self.video_cameras = {}
-        if os.path.exists(os.path.join(args.source_path, "sparse")):
+        source_path = Path(args.source_path)
+        if source_path.is_file() and source_path.suffix.lower() == ".npz":
+            try:
+                scene_info = sceneLoadTypeCallbacks["FourRC"](
+                    args.source_path,
+                    args.fourrc_init_frame,
+                    args.fourrc_confidence_quantile,
+                    args.fourrc_holdout_stride,
+                )
+            except (KeyError, ValueError, OSError) as error:
+                raise ValueError(f"Invalid 4RC archive {args.source_path}: {error}") from error
+            dataset_type="colmap"
+        elif os.path.exists(os.path.join(args.source_path, "sparse")):
             scene_info = sceneLoadTypeCallbacks["Colmap"](args.source_path, args.images, args.eval, args.llffhold)
             dataset_type="colmap"
         elif os.path.exists(os.path.join(args.source_path, "transforms_train.json")):

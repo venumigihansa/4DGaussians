@@ -29,6 +29,7 @@ from plyfile import PlyData, PlyElement
 from utils.sh_utils import SH2RGB
 from scene.gaussian_model import BasicPointCloud
 from utils.general_utils import PILtoTorch
+from utils.fourrc_utils import load_fourrc_scene, world_points_to_depth
 from tqdm import tqdm
 class CameraInfo(NamedTuple):
     uid: int
@@ -197,6 +198,95 @@ def readColmapSceneInfo(path, images, eval, llffhold=8):
                            nerf_normalization=nerf_normalization,
                            ply_path=ply_path)
     return scene_info
+
+
+def _fourrc_scene_normalization(cam_infos, points):
+    normalization = getNerfppNorm(cam_infos)
+    finite_points = np.asarray(points, dtype=np.float32)
+    finite_points = finite_points[np.isfinite(finite_points).all(axis=1)]
+    point_radius = 0.0
+    if len(finite_points):
+        point_center = np.median(finite_points, axis=0)
+        distances = np.linalg.norm(finite_points - point_center, axis=1)
+        point_radius = 1.1 * float(np.quantile(distances, 0.90))
+    normalization["radius"] = max(
+        float(normalization["radius"]), point_radius, np.finfo(np.float32).eps
+    )
+    return normalization
+
+
+def readFourRCSceneInfo(
+    path, init_frame=0, confidence_quantile=0.0, holdout_stride=0
+):
+    if not 0.0 <= confidence_quantile < 1.0:
+        raise ValueError("fourrc_confidence_quantile must be in [0, 1)")
+    if holdout_stride < 0:
+        raise ValueError("fourrc_holdout_stride must be non-negative")
+
+    data = load_fourrc_scene(path, init_frame=init_frame)
+    cam_infos = []
+    for index, (name, image, intrinsic, w2c) in enumerate(
+        zip(data.frame_names, data.images, data.intrinsics, data.world_to_camera)
+    ):
+        cam_infos.append(
+            CameraInfo(
+                uid=index,
+                R=w2c[:3, :3].T.copy(),
+                T=w2c[:3, 3].copy(),
+                FovY=focal2fov(float(intrinsic[1, 1]), data.height),
+                FovX=focal2fov(float(intrinsic[0, 0]), data.width),
+                image=torch.from_numpy(image.copy()),
+                image_path=f"{Path(path).resolve()}#view_{index}_img",
+                image_name=name,
+                width=data.width,
+                height=data.height,
+                time=float(index / len(data.frame_names)),
+                mask=None,
+            )
+        )
+
+    if holdout_stride:
+        test_cam_infos = [cam for index, cam in enumerate(cam_infos) if index % holdout_stride == 0]
+        train_cam_infos = [cam for index, cam in enumerate(cam_infos) if index % holdout_stride != 0]
+        if not train_cam_infos:
+            train_cam_infos = [test_cam_infos.pop()]
+    else:
+        train_cam_infos = list(cam_infos)
+        test_cam_infos = []
+
+    points = data.init_points.reshape(-1, 3)
+    confidence = data.init_confidence.reshape(-1)
+    colors = data.images[data.init_index].transpose(1, 2, 0).reshape(-1, 3)
+    depth = world_points_to_depth(
+        data.init_points, data.world_to_camera[data.init_index]
+    ).reshape(-1)
+    valid = (
+        np.isfinite(points).all(axis=1)
+        & np.isfinite(confidence)
+        & np.isfinite(colors).all(axis=1)
+        & np.isfinite(depth)
+        & (depth > 0)
+    )
+    if confidence_quantile > 0 and valid.any():
+        threshold = float(np.quantile(confidence[valid], confidence_quantile))
+        valid &= confidence >= threshold
+    if not valid.any():
+        raise ValueError("The selected 4RC initialization frame has no valid positive-depth points")
+    points = points[valid].astype(np.float32)
+    colors = colors[valid].astype(np.float32)
+    point_cloud = BasicPointCloud(
+        points=points, colors=colors, normals=np.zeros_like(points, dtype=np.float32)
+    )
+    normalization = _fourrc_scene_normalization(cam_infos, points)
+    return SceneInfo(
+        point_cloud=point_cloud,
+        train_cameras=train_cam_infos,
+        test_cameras=test_cam_infos,
+        video_cameras=list(cam_infos),
+        nerf_normalization=normalization,
+        ply_path=f"{Path(path).resolve()}#pred_{init_frame}_pts",
+        maxtime=0,
+    )
 def generateCamerasFromTransforms(path, template_transformsfile, extension, maxtime):
     trans_t = lambda t : torch.Tensor([
     [1,0,0,0],
@@ -633,6 +723,7 @@ def readMultipleViewinfos(datadir,llffhold=8):
     return scene_info
 
 sceneLoadTypeCallbacks = {
+    "FourRC": readFourRCSceneInfo,
     "Colmap": readColmapSceneInfo,
     "Blender" : readNerfSyntheticInfo,
     "dynerf" : readdynerfInfo,

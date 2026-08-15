@@ -38,7 +38,35 @@ hard support filtering, and manual masks are not used.
 ## Generate 2D priors
 
 Install the optional packages from `requirements-dynamic-split.txt` and the
-official SAM2 package in a preprocessing environment. Generate priors with:
+official SAM2 package in a preprocessing environment. For a native 4RC
+archive, embedded images and geometry are used directly and missing
+bidirectional RAFT flow is generated automatically:
+
+```
+python scripts/generate_dynamic_priors.py \
+  --fourrc-predictions /external/4rc/bear.npz \
+  --sam2-model-cfg configs/sam2.1/sam2.1_hiera_l.yaml \
+  --sam2-checkpoint /external/weights/sam2.1_hiera_large.pt \
+  --output-dir /external/bear/dynamic_priors \
+  --device cuda
+```
+
+The same archive can then be trained directly, including the existing third
+stage:
+
+```
+python train.py \
+  -s /external/4rc/bear.npz \
+  -m /external/experiments/bear_4dgs \
+  --train_dynamic_split \
+  --dynamic_prior_dir /external/bear/dynamic_priors
+```
+
+See [the native 4RC pipeline](fourrc_pipeline.md) for the archive contract,
+dense point-map initialization, cache behavior, and optional split controls.
+4RC trajectory fields are not used by stage 3.
+
+Page4D remains compatible. Existing explicit flow directories can be reused:
 
 ```
 python scripts/generate_dynamic_priors.py \
@@ -58,10 +86,11 @@ python scripts/generate_dynamic_priors.py \
   --sam-min-component-coverage 0.50
 ```
 
-The command preserves PAGE4D pose-and-depth reprojection as its camera-motion
-baseline, then robustly fits only a six-dimensional correction against RAFT.
+For either source, the command preserves geometry pose-and-depth reprojection
+as its camera-motion baseline, then robustly fits only a six-dimensional
+correction against RAFT.
 It filters forward/backward-inconsistent flow and uses the highest-confidence
-90% of PAGE4D depth pixels to fit the camera-flow correction. Residual-motion
+90% of geometry confidence pixels to fit the camera-flow correction. Residual-motion
 detection remains enabled on every geometrically valid, flow-consistent pixel,
 including low-depth-confidence pixels, so textureless moving objects are not
 silently erased. Motion support uses a per-direction median/MAD threshold
@@ -84,9 +113,9 @@ The generated layers remain separate:
 - `overlays/`: fused priors over the RGB frames
 
 `manifest.json` records correction vectors, acceptance decisions, residual
-statistics, component decisions, and every generated path. The loader reads
-only `image_paths`, `depth`, `depth_conf`, `intrinsic`, and `extrinsic` from
-PAGE4D predictions; it never accesses `world_points`.
+statistics, component decisions, every generated path, the geometry source,
+and RAFT cache metadata. The Page4D loader reads only `image_paths`, `depth`,
+`depth_conf`, `intrinsic`, and `extrinsic`; it never accesses `world_points`.
 
 Manual annotations are not accepted by this command and are never used to
 generate or tune an optimization prior. Keep the earlier

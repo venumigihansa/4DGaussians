@@ -58,6 +58,9 @@ class ModelParams(ParamGroup):
         self.add_points=False
         self.extension=".png"
         self.llffhold=8
+        self.fourrc_init_frame = 0
+        self.fourrc_confidence_quantile = 0.0
+        self.fourrc_holdout_stride = 0
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):

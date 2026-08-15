@@ -8,6 +8,7 @@ from typing import Any
 import cv2
 import numpy as np
 from PIL import Image
+from utils.fourrc_utils import load_fourrc_prior_data
 
 from .config import PriorConfig
 from .flow import flow_path, forward_backward_consistency, load_flow, residual_flow
@@ -77,6 +78,17 @@ def load_page4d_geometry(path: Path) -> dict[str, np.ndarray]:
             f"{result['depth'].shape}"
         )
     return result
+
+
+def load_fourrc_geometry(path: Path) -> dict[str, np.ndarray]:
+    data = load_fourrc_prior_data(path)
+    return {
+        "image_paths": np.asarray([f"{name}.png" for name in data.frame_names]),
+        "extrinsic": data.world_to_camera,
+        "intrinsic": data.intrinsics,
+        "depth": data.depth,
+        "depth_conf": data.depth_confidence,
+    }
 
 
 def save_binary_mask(path: Path, mask: np.ndarray) -> None:
@@ -248,8 +260,9 @@ def _segmentation_record(result: PromptedSegmentationResult) -> dict[str, Any]:
     }
 
 
-def run_prior_pipeline(
-    image_dir: Path,
+def _run_prior_core(
+    frames: list[tuple[str, np.ndarray]],
+    geometry: dict[str, np.ndarray],
     forward_flow_dir: Path,
     backward_flow_dir: Path,
     predictions: Path,
@@ -257,24 +270,25 @@ def run_prior_pipeline(
     sam2_model_cfg: str,
     sam2_checkpoint: Path,
     config: PriorConfig,
+    geometry_source: str,
+    image_source: str,
     device: str = "cuda",
     segmenter: Sam2PromptedSegmenter | None = None,
+    raft_metadata: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     config.validate()
-    images = sorted(image_dir.glob("*.png"))
-    if not images:
-        raise FileNotFoundError(f"No PNG images found in {image_dir}")
-    geometry = load_page4d_geometry(predictions)
-    if len(images) != len(geometry["depth"]):
-        raise ValueError(f"Image/geometry frame mismatch: {len(images)} != {len(geometry['depth'])}")
+    if not frames:
+        raise ValueError("Prior generation requires at least one RGB frame")
+    if len(frames) != len(geometry["depth"]):
+        raise ValueError(f"Image/geometry frame mismatch: {len(frames)} != {len(geometry['depth'])}")
     expected_hw = tuple(geometry["depth"].shape[1:])
     sam2 = segmenter or Sam2PromptedSegmenter(sam2_model_cfg, sam2_checkpoint, device=device)
 
     frame_records: list[dict[str, Any]] = []
-    for index, image_path in enumerate(images):
-        rgb = np.asarray(Image.open(image_path).convert("RGB"))
+    for index, (name, rgb) in enumerate(frames):
+        rgb = np.asarray(rgb, dtype=np.uint8)
         if rgb.shape[:2] != expected_hw:
-            raise ValueError(f"Image resolution mismatch for {image_path}: {rgb.shape[:2]} != {expected_hw}")
+            raise ValueError(f"Image resolution mismatch for {name}: {rgb.shape[:2]} != {expected_hw}")
         observations = _load_observations(
             index, geometry, forward_flow_dir, backward_flow_dir, config
         )
@@ -306,7 +320,6 @@ def run_prior_pipeline(
             min_component_coverage=config.sam_min_component_coverage,
         )
 
-        name = image_path.stem
         paths = {
             "residual_support_initial": Path("residual_support_initial") / f"{name}.png",
             "residual_support_refined": Path("residual_support_refined") / f"{name}.png",
@@ -341,20 +354,110 @@ def run_prior_pipeline(
             }
         )
 
+    raft_metadata = dict(raft_metadata or {})
     manifest = {
-        "version": 2,
-        "method": "page4d_pose_plus_robust_flow_correction_and_per_frame_sam2",
-        "images": str(image_dir.resolve()),
+        "version": 3,
+        "method": "pose_plus_robust_flow_correction_and_per_frame_sam2",
+        "geometry_source": geometry_source,
+        "prediction_archive": str(predictions.resolve()),
+        "images": image_source,
         "forward_flow": str(forward_flow_dir.resolve()),
         "backward_flow": str(backward_flow_dir.resolve()),
-        "page4d_predictions": str(predictions.resolve()),
+        "raft_model_weights": raft_metadata.get("model_weights", "external_or_precomputed"),
+        "raft_forward_cache_dir": str(forward_flow_dir.resolve()),
+        "raft_backward_cache_dir": str(backward_flow_dir.resolve()),
+        "raft": raft_metadata,
+        "frame_count": len(frames),
+        "resolution": {"height": expected_hw[0], "width": expected_hw[1]},
         "sam2_model_cfg": sam2_model_cfg,
         "sam2_checkpoint": str(sam2_checkpoint.resolve()),
         "config": asdict(config),
         "ground_truth_used": False,
         "frames": frame_records,
     }
+    if geometry_source == "page4d":
+        manifest["page4d_predictions"] = str(predictions.resolve())
+    elif geometry_source == "fourrc":
+        manifest["fourrc_predictions"] = str(predictions.resolve())
     output_dir.mkdir(parents=True, exist_ok=True)
     with (output_dir / "manifest.json").open("w", encoding="utf-8") as handle:
         json.dump(manifest, handle, indent=2)
     return manifest
+
+
+def run_prior_pipeline(
+    image_dir: Path,
+    forward_flow_dir: Path,
+    backward_flow_dir: Path,
+    predictions: Path,
+    output_dir: Path,
+    sam2_model_cfg: str,
+    sam2_checkpoint: Path,
+    config: PriorConfig,
+    device: str = "cuda",
+    segmenter: Sam2PromptedSegmenter | None = None,
+    raft_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the prior pipeline with Page4D geometry and image files."""
+    image_paths = sorted(Path(image_dir).glob("*.png"))
+    if not image_paths:
+        raise FileNotFoundError(f"No PNG images found in {image_dir}")
+    frames = [
+        (path.stem, np.asarray(Image.open(path).convert("RGB"))) for path in image_paths
+    ]
+    return _run_prior_core(
+        frames,
+        load_page4d_geometry(predictions),
+        forward_flow_dir,
+        backward_flow_dir,
+        predictions,
+        output_dir,
+        sam2_model_cfg,
+        sam2_checkpoint,
+        config,
+        "page4d",
+        str(Path(image_dir).resolve()),
+        device,
+        segmenter,
+        raft_metadata,
+    )
+
+
+def run_fourrc_prior_pipeline(
+    predictions: Path,
+    forward_flow_dir: Path,
+    backward_flow_dir: Path,
+    output_dir: Path,
+    sam2_model_cfg: str,
+    sam2_checkpoint: Path,
+    config: PriorConfig,
+    device: str = "cuda",
+    segmenter: Sam2PromptedSegmenter | None = None,
+    raft_metadata: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Run the same prior core using images and geometry embedded in a 4RC archive."""
+    data = load_fourrc_prior_data(predictions)
+    frames = list(zip(data.frame_names, data.images_uint8))
+    geometry = {
+        "image_paths": np.asarray([f"{name}.png" for name in data.frame_names]),
+        "extrinsic": data.world_to_camera,
+        "intrinsic": data.intrinsics,
+        "depth": data.depth,
+        "depth_conf": data.depth_confidence,
+    }
+    return _run_prior_core(
+        frames,
+        geometry,
+        forward_flow_dir,
+        backward_flow_dir,
+        predictions,
+        output_dir,
+        sam2_model_cfg,
+        sam2_checkpoint,
+        config,
+        "fourrc",
+        f"embedded:{Path(predictions).resolve()}",
+        device,
+        segmenter,
+        raft_metadata,
+    )
