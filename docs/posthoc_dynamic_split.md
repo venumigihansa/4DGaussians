@@ -86,8 +86,9 @@ scripts/run_balloon2_dynamic_split.sh
 ```
 
 The normal `train.py` interface can also enable the stage with
-`--train_dynamic_split`. Defaults reproduce Swift4D stage-2 settings: 3,000
-iterations, Adam learning rate 0.05 to 0.005, and split threshold `d_i > 7`.
+`--train_dynamic_split`. Defaults reproduce the Swift4D stage-2 settings of
+3,000 iterations, an Adam learning rate from 0.05 to 0.005, and a split
+threshold of `d_i > 7`.
 
 ## Evaluate
 

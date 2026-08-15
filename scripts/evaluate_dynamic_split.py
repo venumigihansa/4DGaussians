@@ -24,8 +24,23 @@ def main() -> None:
     pipeline_params = PipelineParams(parser)
     hidden = ModelHiddenParams(parser)
     optimization = OptimizationParams(parser)
-    parser.add_argument("--iteration", type=int, default=-1)
+    parser.add_argument(
+        "--iteration",
+        type=int,
+        default=None,
+        help="Load a saved point-cloud iteration; omit when restoring --fine-checkpoint.",
+    )
     parser.add_argument("--dynamic-output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--export-output-dir",
+        type=Path,
+        help="Write thresholded exports here instead of overwriting the learned-logit directory.",
+    )
+    parser.add_argument(
+        "--dynamic-threshold",
+        type=float,
+        help="Override the threshold stored with the learned dynamic logits.",
+    )
     parser.add_argument("--fine-checkpoint", type=Path)
     parser.add_argument("--ground-truth-dir", type=Path)
     parser.add_argument("--prior-dir", type=Path)
@@ -35,7 +50,9 @@ def main() -> None:
     safe_state(args.quiet)
     dataset = model.extract(args)
     gaussians = GaussianModel(dataset.sh_degree, hidden.extract(args))
-    scene = Scene(dataset, gaussians, load_iteration=args.iteration, shuffle=False)
+    scene = Scene(dataset, gaussians, load_iteration=getattr(args, "iteration", None), shuffle=False)
+    export_output_dir = args.export_output_dir or args.dynamic_output_dir
+    export_output_dir.mkdir(parents=True, exist_ok=True)
     metadata_path = args.dynamic_output_dir / "run_metadata.json"
     metadata = json.loads(metadata_path.read_text()) if metadata_path.is_file() else {}
     fine_checkpoint = getattr(args, "fine_checkpoint", None) or metadata.get("checkpoint_path")
@@ -52,26 +69,47 @@ def main() -> None:
             "Dynamic-logit/Gaussian count mismatch. Evaluate with the exact fine checkpoint "
             "recorded by the dynamic stage or pass --fine-checkpoint explicitly."
         )
-    threshold = float(state.get("threshold", 7.0))
-    dynamic = save_split_arrays(logits, threshold, args.dynamic_output_dir)
-    write_gaussian_subset(gaussians, dynamic, args.dynamic_output_dir / "dynamic_gaussians.ply")
-    write_gaussian_subset(gaussians, ~dynamic, args.dynamic_output_dir / "static_gaussians.ply")
+    threshold = (
+        float(args.dynamic_threshold)
+        if args.dynamic_threshold is not None
+        else float(state.get("threshold", 9.0))
+    )
+    torch.save(
+        {"dynamic_logits": logits.detach().cpu(), "threshold": threshold},
+        export_output_dir / "dynamic_logits.pt",
+    )
+    dynamic = save_split_arrays(logits, threshold, export_output_dir)
+    write_gaussian_subset(gaussians, dynamic, export_output_dir / "dynamic_gaussians.ply")
+    write_gaussian_subset(gaussians, ~dynamic, export_output_dir / "static_gaussians.ply")
     render_split_artifacts(
         ordered_unique_cameras(scene),
         gaussians,
         pipeline_params.extract(args),
         logits,
         threshold,
-        args.dynamic_output_dir,
+        export_output_dir,
         scene.dataset_type,
         args.opacity_threshold,
     )
-    if args.ground_truth_dir:
+    export_metadata = {
+        **metadata,
+        "threshold": threshold,
+        "opacity_threshold": float(args.opacity_threshold),
+        "gaussian_count": int(dynamic.numel()),
+        "dynamic_gaussian_count": int(dynamic.sum()),
+        "static_gaussian_count": int((~dynamic).sum()),
+        "source_dynamic_output_dir": str(args.dynamic_output_dir.resolve()),
+        "posthoc_reexport": True,
+    }
+    with (export_output_dir / "run_metadata.json").open("w", encoding="utf-8") as handle:
+        json.dump(export_metadata, handle, indent=2)
+    ground_truth_dir = getattr(args, "ground_truth_dir", None)
+    if ground_truth_dir:
         report = evaluate_split_masks(
-            args.dynamic_output_dir / "renders" / "binary_masks",
-            args.ground_truth_dir,
-            args.dynamic_output_dir / "evaluation",
-            args.prior_dir,
+            export_output_dir / "renders" / "binary_masks",
+            ground_truth_dir,
+            export_output_dir / "evaluation",
+            getattr(args, "prior_dir", None),
         )
         print(report)
 
