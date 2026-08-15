@@ -14,6 +14,27 @@ z_t(x) = sum_i d_i * alpha_i,t(x) * product_{j<i}(1 - alpha_j,t(x))
 reconstruction, deformation network, opacity, appearance, scale, and rotation
 remain frozen. Manual annotations are never loaded during optimization.
 
+By default, stage 3 also precomputes visibility-aware evidence for each
+Gaussian over all prior frames. A differentiable color probe obtains its mass
+inside the priors, `A_i+`, and its complete visible mass, `V_i`, without
+building a Gaussian-by-pixel tensor:
+
+```
+s_i = A_i+ / (V_i + epsilon)
+v_ref = median({V_i | V_i > epsilon})
+c_i = V_i / (V_i + v_ref)
+p_i = sigmoid((d_i - 7) / T_d)
+L_support = sum_i c_i * BCE(p_i, s_i) / (sum_i c_i + epsilon)
+L = L_pixel + lambda_support * L_support
+```
+
+The probe uses two override-color channels in one fine-stage render and one
+backward rasterizer call per camera. Channel 0 is summed only inside the 2D
+prior; channel 1 is summed over the whole image. Their color gradients recover
+`A_i+` and `V_i`. Support is soft auxiliary supervision: it does not gate the
+original pixel gradients. Deformation-motion evidence, sparsity penalties,
+hard support filtering, and manual masks are not used.
+
 ## Generate 2D priors
 
 Install the optional packages from `requirements-dynamic-split.txt` and the
@@ -82,6 +103,8 @@ export DATASET_DIR=/external/balloon2/colmap_dataset
 export FINE_CHECKPOINT=/external/checkpoints/chkpnt_fine_14000.pth
 export PRIOR_DIR=/external/balloon2/dynamic_priors
 export MODEL_OUTPUT_DIR=/external/experiments/balloon2_posthoc_split
+export DYNAMIC_SUPPORT_WEIGHT=0.1
+export DYNAMIC_SUPPORT_TEMPERATURE=1.0
 scripts/run_balloon2_dynamic_split.sh
 ```
 
@@ -89,6 +112,17 @@ The normal `train.py` interface can also enable the stage with
 `--train_dynamic_split`. Defaults reproduce the Swift4D stage-2 settings of
 3,000 iterations, an Adam learning rate from 0.05 to 0.005, and a split
 threshold of `d_i > 7`.
+The support weight defaults to `0.1` and temperature to `1.0`. Set
+`DYNAMIC_SUPPORT_WEIGHT=0` (or `--dynamic_support_weight 0`) to skip support
+precomputation and restore the pixel-only stage-3 path.
+
+Stage 3 additionally writes `gaussian_prior_support.npz`, whose arrays are
+`positive_mass`, `negative_mass`, `total_visibility`, `support_score`, and
+`confidence`. `training_history.csv` separates total, pixel, unweighted
+support, and weighted support losses. `evaluation/prior_agreement_metrics.json`
+and `evaluation/per_frame_prior_agreement.csv` compare the final split against
+all matching optimization priors. These are proxy-agreement measurements, not
+ground-truth accuracy.
 
 ## Evaluate
 

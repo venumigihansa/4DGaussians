@@ -320,6 +320,8 @@ def training(dataset, hyper, opt, pipe, dynamic_opt, testing_iterations, saving_
             lr_init=dynamic_opt.dynamic_lr_init,
             lr_final=dynamic_opt.dynamic_lr_final,
             threshold=dynamic_opt.dynamic_threshold,
+            support_weight=dynamic_opt.dynamic_support_weight,
+            support_temperature=dynamic_opt.dynamic_support_temperature,
             checkpoint_path=checkpoint,
             source_path=dataset.source_path,
         )

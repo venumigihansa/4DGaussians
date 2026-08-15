@@ -35,4 +35,6 @@ cd "$repo_dir"
     --dynamic_iterations "${DYNAMIC_ITERATIONS:-3000}" \
     --dynamic_lr_init "${DYNAMIC_LR_INIT:-0.05}" \
     --dynamic_lr_final "${DYNAMIC_LR_FINAL:-0.005}" \
-    --dynamic_threshold "${DYNAMIC_THRESHOLD:-7.0}"
+    --dynamic_threshold "${DYNAMIC_THRESHOLD:-7.0}" \
+    --dynamic_support_weight "${DYNAMIC_SUPPORT_WEIGHT:-0.1}" \
+    --dynamic_support_temperature "${DYNAMIC_SUPPORT_TEMPERATURE:-1.0}"

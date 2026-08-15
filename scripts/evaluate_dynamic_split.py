@@ -11,7 +11,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from arguments import ModelHiddenParams, ModelParams, OptimizationParams, PipelineParams, get_combined_args
-from dynamic_split.evaluation import evaluate_split_masks
+from dynamic_split.evaluation import evaluate_prior_agreement, evaluate_split_masks
 from dynamic_split.export import render_split_artifacts, save_split_arrays, write_gaussian_subset
 from dynamic_split.io import ordered_unique_cameras
 from scene import GaussianModel, Scene
@@ -72,7 +72,7 @@ def main() -> None:
     threshold = (
         float(args.dynamic_threshold)
         if args.dynamic_threshold is not None
-        else float(state.get("threshold", 9.0))
+        else float(state.get("threshold", 7.0))
     )
     torch.save(
         {"dynamic_logits": logits.detach().cpu(), "threshold": threshold},
@@ -104,12 +104,20 @@ def main() -> None:
     with (export_output_dir / "run_metadata.json").open("w", encoding="utf-8") as handle:
         json.dump(export_metadata, handle, indent=2)
     ground_truth_dir = getattr(args, "ground_truth_dir", None)
+    prior_dir = getattr(args, "prior_dir", None)
+    if prior_dir:
+        proxy_report = evaluate_prior_agreement(
+            export_output_dir / "renders" / "binary_masks",
+            prior_dir,
+            export_output_dir / "evaluation",
+        )
+        print({"prior_agreement": proxy_report})
     if ground_truth_dir:
         report = evaluate_split_masks(
             export_output_dir / "renders" / "binary_masks",
             ground_truth_dir,
             export_output_dir / "evaluation",
-            getattr(args, "prior_dir", None),
+            prior_dir,
         )
         print(report)
 

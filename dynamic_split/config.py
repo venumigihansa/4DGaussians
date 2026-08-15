@@ -45,6 +45,8 @@ class DynamicSplitConfig:
     lr_init: float = 0.05
     lr_final: float = 0.005
     threshold: float = 7.0
+    support_weight: float = 0.1
+    support_temperature: float = 1.0
     seed: int = 6666
     checkpoint_path: str | None = None
     source_path: str | None = None
@@ -54,6 +56,10 @@ class DynamicSplitConfig:
             raise ValueError("dynamic iterations must be positive")
         if self.lr_init <= 0 or self.lr_final <= 0:
             raise ValueError("dynamic learning rates must be positive")
+        if self.support_weight < 0:
+            raise ValueError("dynamic support weight must be non-negative")
+        if self.support_temperature <= 0:
+            raise ValueError("dynamic support temperature must be positive")
         if require_priors and not self.prior_dir.is_dir():
             raise FileNotFoundError(f"Dynamic prior directory not found: {self.prior_dir}")
         return self

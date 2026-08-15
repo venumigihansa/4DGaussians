@@ -15,6 +15,7 @@ dynamic_priors/
 dynamic_split/outputs/
 **/dynamic_logits.pt
 **/gaussian_dynamic_split.npz
+**/gaussian_prior_support.npz
 **/static_gaussians.ply
 **/dynamic_gaussians.ply
 **/static_dynamic_overlay.mp4

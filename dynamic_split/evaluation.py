@@ -84,3 +84,56 @@ def evaluate_split_masks(
         writer.writeheader()
         writer.writerows(rows)
     return report
+
+
+def evaluate_prior_agreement(
+    rendered_mask_dir: Path,
+    prior_dir: Path,
+    output_dir: Path,
+) -> dict:
+    """Compare a 3D split with its 2D optimization priors, not ground truth."""
+    _, prior_mapping = load_prior_manifest(prior_dir)
+    rows: list[dict] = []
+    total = np.zeros(4, dtype=np.int64)
+    predicted_pixels = 0
+    prior_pixels = 0
+    all_pixels = 0
+    for name, prior_path in sorted(prior_mapping.items()):
+        predicted_path = rendered_mask_dir / f"{name}.png"
+        if not predicted_path.is_file():
+            raise FileNotFoundError(f"Rendered split mask missing for prior frame: {predicted_path}")
+        prediction = load_binary(predicted_path)
+        prior = load_binary(prior_path)
+        counts = confusion_counts(prediction, prior)
+        total += counts
+        frame_pixels = int(prior.size)
+        frame_predicted = int(prediction.sum())
+        frame_prior = int(prior.sum())
+        predicted_pixels += frame_predicted
+        prior_pixels += frame_prior
+        all_pixels += frame_pixels
+        rows.append(
+            {
+                "image_name": name,
+                **metrics_from_counts(*counts),
+                "predicted_dynamic_fraction": frame_predicted / frame_pixels,
+                "prior_dynamic_fraction": frame_prior / frame_pixels,
+            }
+        )
+    report = {
+        "reference_type": "2D dynamic priors (proxy agreement; not ground truth accuracy)",
+        "matching_frames": len(rows),
+        **metrics_from_counts(*map(int, total)),
+        "predicted_dynamic_fraction": predicted_pixels / all_pixels,
+        "prior_dynamic_fraction": prior_pixels / all_pixels,
+    }
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with (output_dir / "prior_agreement_metrics.json").open("w", encoding="utf-8") as handle:
+        json.dump(report, handle, indent=2)
+    with (output_dir / "per_frame_prior_agreement.csv").open(
+        "w", newline="", encoding="utf-8"
+    ) as handle:
+        writer = csv.DictWriter(handle, fieldnames=list(rows[0]))
+        writer.writeheader()
+        writer.writerows(rows)
+    return report

@@ -80,6 +80,8 @@ class DynamicSplitParams(ParamGroup):
         self.dynamic_lr_init = 0.05
         self.dynamic_lr_final = 0.005
         self.dynamic_threshold = 7.0
+        self.dynamic_support_weight = 0.1
+        self.dynamic_support_temperature = 1.0
         super().__init__(parser, "Post-hoc Dynamic Split Parameters", sentinel)
 class ModelHiddenParams(ParamGroup):
     def __init__(self, parser):
