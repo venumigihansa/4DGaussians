@@ -13,7 +13,6 @@ import numpy as np
 import torch
 from scene import Scene
 import os
-import cv2
 from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render
