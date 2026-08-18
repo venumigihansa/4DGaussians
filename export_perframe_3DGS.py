@@ -3,7 +3,6 @@ import numpy as np
 import torch
 from scene import Scene
 import os
-import cv2
 from tqdm import tqdm
 from os import makedirs
 from gaussian_renderer import render
@@ -13,7 +12,6 @@ from argparse import ArgumentParser
 from arguments import ModelParams, PipelineParams, get_combined_args, ModelHiddenParams
 from gaussian_renderer import GaussianModel
 from time import time
-import open3d as o3d
 from plyfile import PlyData, PlyElement
 # import torch.multiprocessing as mp
 import threading
@@ -29,15 +27,6 @@ def render_sets(dataset : ModelParams, hyperparam, iteration : int, pipeline : P
 
     return gaussians, scene
 
-def save_point_cloud(points, model_path, timestamp):
-    output_path = os.path.join(model_path,"point_pertimestamp")
-    if not os.path.exists(output_path):
-        os.makedirs(output_path,exist_ok=True)
-    points = points.detach().cpu().numpy()
-    pcd = o3d.geometry.PointCloud()
-    pcd.points = o3d.utility.Vector3dVector(points)
-    ply_path = os.path.join(output_path,f"points_{timestamp}.ply")
-    o3d.io.write_point_cloud(ply_path, pcd)
 def construct_list_of_attributes(feature_dc_shape, feature_rest_shape, scaling_shape,rotation_shape):
     l = ['x', 'y', 'z', 'nx', 'ny', 'nz']
     # All channels except the 3 DC
@@ -97,7 +86,7 @@ gaussians, scene = render_sets(model.extract(args), hyperparam.extract(args), ar
 output_path = os.path.join(args.model_path,"gaussian_pertimestamp")
 os.makedirs(output_path,exist_ok=True)
 print("Computing Gaussians.")
-for index, viewpoint in enumerate(scene.getTestCameras()):
+for index, viewpoint in enumerate(scene.getVideoCameras()):
     
     points, scales_final, rotations_final, opacity_final, shs_final = get_state_at_time(gaussians, viewpoint)
     feature_dc_shape = gaussians._features_dc.shape[1]
