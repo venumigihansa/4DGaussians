@@ -216,12 +216,15 @@ def _fourrc_scene_normalization(cam_infos, points):
 
 
 def readFourRCSceneInfo(
-    path, init_frame=0, confidence_quantile=0.0, holdout_stride=0
+    path, init_frame=0, confidence_quantile=0.0, holdout_stride=0,
+    max_init_points=0,
 ):
     if not 0.0 <= confidence_quantile < 1.0:
         raise ValueError("fourrc_confidence_quantile must be in [0, 1)")
     if holdout_stride < 0:
         raise ValueError("fourrc_holdout_stride must be non-negative")
+    if max_init_points < 0:
+        raise ValueError("fourrc_max_init_points must be non-negative")
 
     data = load_fourrc_scene(path, init_frame=init_frame)
     cam_infos = []
@@ -272,6 +275,14 @@ def readFourRCSceneInfo(
         valid &= confidence >= threshold
     if not valid.any():
         raise ValueError("The selected 4RC initialization frame has no valid positive-depth points")
+    valid_indices = np.flatnonzero(valid)
+    if max_init_points > 0 and valid_indices.size > max_init_points:
+        sample_positions = np.linspace(
+            0, valid_indices.size - 1, num=max_init_points, dtype=np.int64
+        )
+        selected_indices = valid_indices[sample_positions]
+        valid[:] = False
+        valid[selected_indices] = True
     points = points[valid].astype(np.float32)
     colors = colors[valid].astype(np.float32)
     point_cloud = BasicPointCloud(

@@ -411,7 +411,25 @@ class GaussianModel:
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
-    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2):
+    @staticmethod
+    def _limit_densification_selection(selected_mask, scores, max_selected):
+        if max_selected is None:
+            return selected_mask
+        max_selected = max(0, int(max_selected))
+        selected_indices = torch.nonzero(selected_mask, as_tuple=False).squeeze(1)
+        if selected_indices.numel() <= max_selected:
+            return selected_mask
+        limited_mask = torch.zeros_like(selected_mask)
+        if max_selected == 0:
+            return limited_mask
+        selected_scores = scores[selected_indices]
+        keep = torch.topk(
+            selected_scores, k=max_selected, largest=True, sorted=False
+        ).indices
+        limited_mask[selected_indices[keep]] = True
+        return limited_mask
+
+    def densify_and_split(self, grads, grad_threshold, scene_extent, N=2, max_new_points=None):
         n_init_points = self.get_xyz.shape[0]
         # Extract points that satisfy the gradient condition
         padded_grad = torch.zeros((n_init_points), device="cuda")
@@ -421,6 +439,14 @@ class GaussianModel:
         # breakpoint()
         selected_pts_mask = torch.logical_and(selected_pts_mask,
                                               torch.max(self.get_scaling, dim=1).values > self.percent_dense*scene_extent)
+        max_selected = (
+            None
+            if max_new_points is None
+            else max_new_points // max(N - 1, 1)
+        )
+        selected_pts_mask = self._limit_densification_selection(
+            selected_pts_mask, padded_grad, max_selected
+        )
         if not selected_pts_mask.any():
             return
         stds = self.get_scaling[selected_pts_mask].repeat(N,1)
@@ -439,12 +465,18 @@ class GaussianModel:
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
 
-    def densify_and_clone(self, grads, grad_threshold, scene_extent, density_threshold=20, displacement_scale=20, model_path=None, iteration=None, stage=None):
-        grads_accum_mask = torch.where(torch.norm(grads, dim=-1) >= grad_threshold, True, False)
+    def densify_and_clone(self, grads, grad_threshold, scene_extent, density_threshold=20, displacement_scale=20, model_path=None, iteration=None, stage=None, max_new_points=None):
+        grad_norm = torch.norm(grads, dim=-1)
+        grads_accum_mask = torch.where(grad_norm >= grad_threshold, True, False)
         
 
         selected_pts_mask = torch.logical_and(grads_accum_mask,
                                               torch.max(self.get_scaling, dim=1).values <= self.percent_dense*scene_extent)
+        selected_pts_mask = self._limit_densification_selection(
+            selected_pts_mask, grad_norm, max_new_points
+        )
+        if not selected_pts_mask.any():
+            return
         new_xyz = self._xyz[selected_pts_mask] 
         new_features_dc = self._features_dc[selected_pts_mask]
         new_features_rest = self._features_rest[selected_pts_mask]
@@ -497,12 +529,29 @@ class GaussianModel:
         self.prune_points(prune_mask)
 
         torch.cuda.empty_cache()
-    def densify(self, max_grad, min_opacity, extent, max_screen_size, density_threshold, displacement_scale, model_path=None, iteration=None, stage=None):
+    def densify(self, max_grad, min_opacity, extent, max_screen_size, density_threshold, displacement_scale, model_path=None, iteration=None, stage=None, max_gaussians=None):
         grads = self.xyz_gradient_accum / self.denom
         grads[grads.isnan()] = 0.0
 
-        self.densify_and_clone(grads, max_grad, extent, density_threshold, displacement_scale, model_path, iteration, stage)
-        self.densify_and_split(grads, max_grad, extent)
+        remaining = None
+        if max_gaussians is not None and max_gaussians > 0:
+            remaining = max(0, int(max_gaussians) - self.get_xyz.shape[0])
+        self.densify_and_clone(
+            grads,
+            max_grad,
+            extent,
+            density_threshold,
+            displacement_scale,
+            model_path,
+            iteration,
+            stage,
+            max_new_points=remaining,
+        )
+        if max_gaussians is not None and max_gaussians > 0:
+            remaining = max(0, int(max_gaussians) - self.get_xyz.shape[0])
+        self.densify_and_split(
+            grads, max_grad, extent, max_new_points=remaining
+        )
     def standard_constaint(self):
         
         means3D = self._xyz.detach()

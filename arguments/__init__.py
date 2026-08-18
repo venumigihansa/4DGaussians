@@ -61,6 +61,7 @@ class ModelParams(ParamGroup):
         self.fourrc_init_frame = 0
         self.fourrc_confidence_quantile = 0.0
         self.fourrc_holdout_stride = 0
+        self.fourrc_max_init_points = 0
         super().__init__(parser, "Loading Parameters", sentinel)
 
     def extract(self, args):
@@ -152,6 +153,7 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.densify_from_iter = 500
         self.densify_until_iter = 15_000
+        self.max_gaussians = 360_000
         self.densify_grad_threshold_coarse = 0.0002
         self.densify_grad_threshold_fine_init = 0.0002
         self.densify_grad_threshold_after = 0.0002

@@ -41,9 +41,25 @@ python train.py \
 
 `--fourrc_confidence_quantile Q` optionally retains points at or above the
 `Q` confidence quantile after geometric validity filtering. Its default is
-`0.0`, which disables confidence filtering. All frames train by default.
+`0.0`, which disables confidence filtering. `--fourrc_max_init_points N`
+then deterministically samples at most `N` valid points across the full image,
+preserving spatial coverage; `0` keeps all valid points. All frames train by
+default.
 `--fourrc_holdout_stride N` reserves frames `0,N,2N,...` for testing while
 requiring at least one frame to remain for training.
+
+Training densification defaults to the historical 360,000-Gaussian ceiling.
+Use `--max_gaussians N` to set a different hard ceiling; individual clone and
+split operations are budgeted so the trained model does not grow past it. For
+example, initialize from 40,000 points and cap training at 100,000 Gaussians:
+
+```bash
+python train.py \
+  -s /path/to/car_turn.npz \
+  -m /path/to/car_turn_4dgs \
+  --fourrc_max_init_points 40000 \
+  --max_gaussians 100000
+```
 
 The loader inverts every camera-to-world pose for rendering. It derives the
 scene radius from both camera centers and the 90th-percentile distance from

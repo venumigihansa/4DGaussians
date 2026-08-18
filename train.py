@@ -54,6 +54,12 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
             (model_params, first_iter) = torch.load(checkpoint)
             gaussians.restore(model_params, opt)
 
+    if opt.max_gaussians > 0 and gaussians.get_xyz.shape[0] > opt.max_gaussians:
+        raise ValueError(
+            f"Model has {gaussians.get_xyz.shape[0]} Gaussians, exceeding "
+            f"--max_gaussians={opt.max_gaussians}"
+        )
+
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -267,17 +273,37 @@ def scene_reconstruction(dataset, opt, hyper, pipe, testing_iterations, saving_i
                 else:    
                     opacity_threshold = opt.opacity_threshold_fine_init - iteration*(opt.opacity_threshold_fine_init - opt.opacity_threshold_fine_after)/(opt.densify_until_iter)  
                     densify_threshold = opt.densify_grad_threshold_fine_init - iteration*(opt.densify_grad_threshold_fine_init - opt.densify_grad_threshold_after)/(opt.densify_until_iter )  
-                if  iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and gaussians.get_xyz.shape[0]<360000:
+                below_gaussian_cap = (
+                    opt.max_gaussians <= 0
+                    or gaussians.get_xyz.shape[0] < opt.max_gaussians
+                )
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 and below_gaussian_cap:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
                     
-                    gaussians.densify(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold, 5, 5, scene.model_path, iteration, stage)
-                if  iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0 and gaussians.get_xyz.shape[0]>200000:
+                    gaussians.densify(
+                        densify_threshold,
+                        opacity_threshold,
+                        scene.cameras_extent,
+                        size_threshold,
+                        5,
+                        5,
+                        scene.model_path,
+                        iteration,
+                        stage,
+                        max_gaussians=opt.max_gaussians,
+                    )
+                prune_start_count = (
+                    min(200000, opt.max_gaussians)
+                    if opt.max_gaussians > 0
+                    else 200000
+                )
+                if iteration > opt.pruning_from_iter and iteration % opt.pruning_interval == 0 and gaussians.get_xyz.shape[0] >= prune_start_count:
                     size_threshold = 20 if iteration > opt.opacity_reset_interval else None
 
                     gaussians.prune(densify_threshold, opacity_threshold, scene.cameras_extent, size_threshold)
                     
                 # if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0 :
-                if iteration % opt.densification_interval == 0 and gaussians.get_xyz.shape[0]<360000 and opt.add_point:
+                if iteration % opt.densification_interval == 0 and below_gaussian_cap and opt.add_point:
                     gaussians.grow(5,5,scene.model_path,iteration,stage)
                     # torch.cuda.empty_cache()
                 if iteration % opt.opacity_reset_interval == 0:

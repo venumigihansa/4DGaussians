@@ -1,8 +1,10 @@
 from pathlib import Path
 
 import numpy as np
+import torch
 
 from scene.dataset_readers import readFourRCSceneInfo
+from scene.gaussian_model import GaussianModel
 from utils.fourrc_utils import load_fourrc_prior_data, load_fourrc_scene
 
 
@@ -92,6 +94,36 @@ def test_confidence_quantile_holdout_and_fixed_camera_point_radius(tmp_path):
     retain_one = readFourRCSceneInfo(archive, holdout_stride=1)
     assert len(retain_one.train_cameras) == 1
     assert len(retain_one.test_cameras) == 2
+
+
+def test_max_init_points_is_exact_spatial_and_deterministic(tmp_path):
+    archive = write_fourrc_archive(tmp_path / "scene.npz")
+    first = readFourRCSceneInfo(archive, max_init_points=7)
+    second = readFourRCSceneInfo(archive, max_init_points=7)
+    assert len(first.point_cloud.points) == 7
+    assert np.array_equal(first.point_cloud.points, second.point_cloud.points)
+    assert np.ptp(first.point_cloud.points[:, 0]) > 0
+    assert np.ptp(first.point_cloud.points[:, 1]) > 0
+
+
+def test_negative_max_init_points_fails(tmp_path):
+    archive = write_fourrc_archive(tmp_path / "scene.npz")
+    try:
+        readFourRCSceneInfo(archive, max_init_points=-1)
+    except ValueError as error:
+        assert "fourrc_max_init_points" in str(error)
+    else:
+        raise AssertionError("Expected a negative initialization-cap error")
+
+
+def test_densification_selection_respects_budget():
+    selected = torch.tensor([True, True, False, True, True])
+    scores = torch.tensor([0.1, 0.9, 0.2, 0.8, 0.3])
+    limited = GaussianModel._limit_densification_selection(selected, scores, 2)
+    assert torch.equal(limited, torch.tensor([False, True, False, True, False]))
+    assert not GaussianModel._limit_densification_selection(
+        selected, scores, 0
+    ).any()
 
 
 def test_invalid_archives_fail_clearly(tmp_path):

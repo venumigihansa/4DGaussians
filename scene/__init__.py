@@ -51,6 +51,7 @@ class Scene:
                     args.fourrc_init_frame,
                     args.fourrc_confidence_quantile,
                     args.fourrc_holdout_stride,
+                    getattr(args, "fourrc_max_init_points", 0),
                 )
             except (KeyError, ValueError, OSError) as error:
                 raise ValueError(f"Invalid 4RC archive {args.source_path}: {error}") from error
